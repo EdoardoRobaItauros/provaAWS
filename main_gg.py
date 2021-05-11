@@ -7,6 +7,24 @@ import statsmodels.api as sm
 # from scipy import stats
 from datetime import datetime,timedelta
 import calendar as c
+import boto3
+
+def isdir_s3(bucket, key):
+    objs = list(bucket.objects.filter(Prefix=key))
+#     print('I am the master_dir')
+    return len(objs)
+
+def costruzione_file_da_mensile(source, inizio, fine):
+    bucketname = 'zus-prod-s3'
+    s3 = boto3.resource('s3')
+#     source = 'preprocessato/sistema/temperatura/epson/temperatura'
+    my_bucket = s3.Bucket(bucketname)
+    annomesi = pd.date_range(inizio, fine,freq='MS').strftime('%Y%m').tolist()
+    df = pd.DataFrame()
+    for am in annomesi:
+        if isdir_s3(my_bucket,source + '/' +str(am))>0:
+            df = df.append(pd.read_csv('s3://'+bucketname+source+'/'+str(am)+'/epson_best.csv'))
+    return df
 
 def compute_std_var(df_in,finestra_media_mobile_g,col):
     df = df_in.copy()
@@ -129,15 +147,29 @@ def intervalli_confidenza(df,column):
     df['c_i_95_'+column+'_h'] = df[column] + 1.96 * df['std']/np.sqrt(df['n_osservazioni'])
     return df
 
-def lettura_temp_norm(file_t_norm,inizio,fine,finestra_media_mobile_g):
-    df = pd.read_csv(file_t_norm)#,encoding='utf-16')
+#def lettura_temp_norm(file_t_norm,inizio,fine,finestra_media_mobile_g):
+def lettura_temp_norm(df,inizio,fine,finestra_media_mobile_g,t):
+
+#     df = pd.read_csv(file_t_norm)#,encoding='utf-16')
+    #df = pd.read_csv(file_t_norm)#,encoding='utf-16')
     
-    df.rename(columns={'TIME - Date':'date','Codice Provincia':'provincia','Temperature Min':'temp_min','Temperature Max':'temp_max'},inplace=True)
+    #df.rename(columns={'TIME - Date':'date','Codice Provincia':'provincia','Temperature Min':'temp_min','Temperature Max':'temp_max'},inplace=True)
+
+
+    #df = costruzione_file_da_mensile(file_t_norm,inizio,fine)
+#     if t.lower() = 'prov':
+#         tipo = 'PROVINCIA'
+#     else:
+#         tipo = 'OSSERVATORIO'
+    df = df[['DATA',tipo.upper(),'TEMPERATURA_MAX','TEMPERATURA_MIN']]
+    df.rename(columns={'DATA':'date',tipo.upper():tipo.lower(),'TEMPERATURA_MIN':'temp_min','TEMPERATURA_MAX':'temp_max'},inplace=True)
+    
+    df = df[~df[tipo.lower()].isnull()]
     
     df['date'] = pd.to_datetime(df['date'],format='%d/%m/%Y')
     df = df[(df['date']>=inizio) & (df['date']<=fine)]
     df['T_mean'] = df[['temp_min', 'temp_max']].mean(axis=1)
-    df.drop('Desc_Provincia',axis=1,inplace=True)
+#     df.drop('Desc_Provincia',axis=1,inplace=True)
 
     df = df.assign(
         dayofyear=lambda x: (x.date).dt.dayofyear, # + pd.DateOffset(days=92)
@@ -158,15 +190,15 @@ def lettura_temp_norm(file_t_norm,inizio,fine,finestra_media_mobile_g):
 #     df_con.to_csv('df_con_92.csv',index=False)
 #     ciao
 #     Raggruppo per provincia e monthyear
-    tmp = (df[['monthyear','date','provincia']].groupby(['monthyear','provincia']).count()).reset_index()
+    tmp = (df[['monthyear','date',tipo]].groupby(['monthyear',tipo]).count()).reset_index()
     tmp['monthyear'] = tmp['monthyear'].astype('str')
     tmp['monthyear'] = tmp['monthyear'].str.slice(stop=2)
     tmp.rename(columns={'date':'n_anni','monthyear':'month'},inplace=True)
     tmp['n_anni'] = 1
     
-    tmp = tmp.groupby(['month','provincia']).count().reset_index()
+    tmp = tmp.groupby(['month',tipo]).count().reset_index()
     
-    df = df.merge(tmp,on=['provincia'],how='left')
+    df = df.merge(tmp,on=[tipo],how='left')
     
     df['n_osservazioni'] = df['n_anni']*finestra_media_mobile_g
 
@@ -175,13 +207,18 @@ def lettura_temp_norm(file_t_norm,inizio,fine,finestra_media_mobile_g):
     df['monthday'] = df['date'].dt.month.astype('str').str.pad(2, side='left', fillchar='0') + '-' + df['date'].dt.day.astype('str').str.pad(2, side='left', fillchar='0')   
     return df
 
-def lettura_osservatorio(file_oss,inizio,fine,finestra_media_mobile_g):
-    df_oss = pd.read_csv(file_oss)
-    df_oss.rename(columns={'Cd Oss':'codice_oss','T Oss':'T_oss','Data':'date'},inplace=True)
+def lettura_osservatorio(df,inizio,fine,finestra_media_mobile_g):
+#     df_oss = pd.read_csv(file_oss)
+    #df_oss.rename(columns={'Cd Oss':'codice_oss','T Oss':'T_oss','Data':'date'},inplace=True)
     
     df_oss['date'] = df_oss['date'].astype('str')
     df_oss['date'] = pd.to_datetime(df_oss['date'],format='%Y-%m-%d', exact=False)
     df_oss = df_oss[(df_oss['date']>=inizio) & (df_oss['date']<=fine)]
+    df_oss = df_oss[~df_oss['codice_oss'].isnull()]
+
+    df['T_mean'] = df[['temp_min', 'temp_max']].mean(axis=1)
+    df.drop('Desc_Provincia',axis=1,inplace=True)
+    
     df_oss = df_oss.assign(
         dayofyear=lambda x: (x.date).dt.dayofyear, # + pd.DateOffset(days=92)
         year=lambda x: (x.date).dt.year, # + pd.DateOffset(days=92)
@@ -208,50 +245,53 @@ def lettura_osservatorio(file_oss,inizio,fine,finestra_media_mobile_g):
     df_oss['monthday'] = df_oss['date'].dt.month.astype('str').str.pad(2, side='left', fillchar='0') + '-' + df_oss['date'].dt.day.astype('str').str.pad(2, side='left', fillchar='0')
     return df_oss
 
-def calcolo_temp_norm_gg(file_t_norm,inizio,fine,finestra_media_mobile_g):
-
+def calcolo_temp_norm_gg(file_t_norm,inizio,fine,finestra_media_mobile_g,t):
+    if t.lower()=='prov':
+        tipo = 'PROVINCIA'
+    else:
+        tipo='OSSERVATORIO'
 #     Calcolo temperature normali giornaliere
-    print("Lettura file temperature per provincia.")
-    df = lettura_temp_norm(file_t_norm,inizio,fine,finestra_media_mobile_g)
+    print("Lettura file temperature per tipo.")
+    df = lettura_temp_norm(file_t_norm,inizio,fine,finestra_media_mobile_g,tipo)
     
-    print("Numero province presenti: ",df['provincia'].nunique())
+    print("Numero "+tipo+" presenti: ",df[tipo].nunique())
     
     print("Calcolo deviazione standard.")
-    df_max = df.groupby('provincia').apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='temp_max')[['provincia','date','temp_max_var','temp_max_std']]
-    df_min = df.groupby('provincia').apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='temp_min')[['provincia','date','temp_min_var','temp_min_std']]
-    df_mean = df.groupby('provincia').apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='T_mean')[['provincia','date','T_mean_var','T_mean_std']]
+    df_max = df.groupby(tipo).apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='temp_max')[[tipo,'date','temp_max_var','temp_max_std']]
+    df_min = df.groupby(tipo).apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='temp_min')[[tipo,'date','temp_min_var','temp_min_std']]
+    df_mean = df.groupby(tipo).apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='T_mean')[[tipo,'date','T_mean_var','T_mean_std']]
 
-    df_max.drop('provincia',axis=1,inplace=True)
-    df_min.drop('provincia',axis=1,inplace=True)
-    df_mean.drop('provincia',axis=1,inplace=True)
+    df_max.drop(tipo,axis=1,inplace=True)
+    df_min.drop(tipo,axis=1,inplace=True)
+    df_mean.drop(tipo,axis=1,inplace=True)
     
     df_max.reset_index(inplace=True)
     df_min.reset_index(inplace=True)
     df_mean.reset_index(inplace=True)
     
-    df = df.merge(df_max, on=['provincia','date'], how='left')
-    df = df.merge(df_min, on=['provincia','date'], how='left')
-    df = df.merge(df_mean, on=['provincia','date'], how='left')
+    df = df.merge(df_max, on=[tipo,'date'], how='left')
+    df = df.merge(df_min, on=[tipo,'date'], how='left')
+    df = df.merge(df_mean, on=[tipo,'date'], how='left')
     
     df.rename(columns={'temp_max':'T_max_mean','temp_min':'T_min_mean','T_mean':'T_mean_m'},inplace=True)
     
 #     df.to_csv("df_senza_92.csv",index=False)
     
-    max_min_gg = df.groupby(['dayofyear','provincia']).agg({'T_min_mean':['min'],'T_max_mean':['max']})
+    max_min_gg = df.groupby(['dayofyear',tipo]).agg({'T_min_mean':['min'],'T_max_mean':['max']})
     max_min_gg.columns = max_min_gg.columns.droplevel(0)
     max_min_gg = max_min_gg.reset_index()
     max_min_gg.rename(columns={'min':'T_min_abs','max':'T_max_abs'},inplace=True)
     
     print("Calcolo media giornaliera.")
-    temp_norm = df.groupby(['dayofyear', 'provincia'])[['T_min_mean', 'T_max_mean','T_mean_m', 'temp_max_std', 'temp_max_var', 'temp_min_std', 'temp_min_var', 'T_mean_std', 'T_mean_var']].mean().unstack().reindex(range(367)).interpolate(method='linear').stack()#.reset_index() #,'T_mean'
+    temp_norm = df.groupby(['dayofyear', tipo])[['T_min_mean', 'T_max_mean','T_mean_m', 'temp_max_std', 'temp_max_var', 'temp_min_std', 'temp_min_var', 'T_mean_std', 'T_mean_var']].mean().unstack().reindex(range(367)).interpolate(method='linear').stack()#.reset_index() #,'T_mean'
     
-    province = temp_norm.reset_index(['provincia']).provincia.unique()
+    province = temp_norm.reset_index([tipo]).tipo.unique()
     finale = pd.DataFrame()
 
     print("Inizio procedura di fit con armoniche di sesto grado.")
 #     Fit armoniche di sesto grado per curve T_min, T_max e T_mean
     for p in province:
-        temp_p = temp_norm.query('provincia == {}'.format(p)).reset_index(['provincia','dayofyear'])#.assign(std_mean=lambda x: x['std'], iv_l=lambda x: (x['mean'] - 2*x['std'].rolling(window=15, center=True).mean()), iv_h=lambda x: (x['mean'] + 2*x['std'].rolling(window=15, center=True).mean()))
+        temp_p = temp_norm.query('tipo == {}'.format(p)).reset_index([tipo,'dayofyear'])#.assign(std_mean=lambda x: x['std'], iv_l=lambda x: (x['mean'] - 2*x['std'].rolling(window=15, center=True).mean()), iv_h=lambda x: (x['mean'] + 2*x['std'].rolling(window=15, center=True).mean()))
         ###########################
 #         temp_p = temp_p.merge(tmp,on='')
         ###########################
@@ -289,18 +329,18 @@ def calcolo_temp_norm_gg(file_t_norm,inizio,fine,finestra_media_mobile_g):
     finale['gradi_giorno_T_mean'] = finale.apply(lambda x: max(0,18-x['T_mean_m']),axis=1)
     finale.reset_index(inplace=True)
     
-    selezione = df[['provincia','n_osservazioni']]
-    selezione = selezione.groupby('provincia').apply(highest_number)
+    selezione = df[[tipo,'n_osservazioni']]
+    selezione = selezione.groupby(tipo).apply(highest_number)
     selezione.drop_duplicates(inplace=True)
-    finale = finale.merge(selezione,on=['provincia'],how='left')
+    finale = finale.merge(selezione,on=[tipo],how='left')
 
     temp_max = temp_norm[['T_max_mean', 'temp_max_std', 'temp_max_var']].rename(columns={'temp_max_std': 'std', 'temp_max_var': 'var'}).reset_index()
     temp_min = temp_norm[['T_min_mean', 'temp_min_std', 'temp_min_var']].rename(columns={'temp_min_std': 'std', 'temp_min_var': 'var'}).reset_index()
     temp_mean = temp_norm[['T_mean_m', 'T_mean_std', 'T_mean_var']].rename(columns={'T_mean_std': 'std', 'T_mean_var': 'var'}).reset_index()
 
-    temp_max = temp_max.merge(finale[['dayofyear','provincia','yhat_max','n_osservazioni']],on=['dayofyear','provincia'],how='left')
-    temp_min = temp_min.merge(finale[['dayofyear','provincia','yhat_min','n_osservazioni']],on=['dayofyear','provincia'],how='left')
-    temp_mean = temp_mean.merge(finale[['dayofyear','provincia','yhat_mean','gradi_giorno_yhat_mean','gradi_giorno_T_mean','n_osservazioni']],on=['dayofyear','provincia'],how='left')
+    temp_max = temp_max.merge(finale[['dayofyear',tipo,'yhat_max','n_osservazioni']],on=['dayofyear',tipo],how='left')
+    temp_min = temp_min.merge(finale[['dayofyear',tipo,'yhat_min','n_osservazioni']],on=['dayofyear',tipo],how='left')
+    temp_mean = temp_mean.merge(finale[['dayofyear',tipo,'yhat_mean','gradi_giorno_yhat_mean','gradi_giorno_T_mean','n_osservazioni']],on=['dayofyear',tipo],how='left')
 
     print("Calcolo percentili per curve di minimo, massimo e media.")
     temp_max = calcolo_percentili(temp_max,'max')
@@ -337,19 +377,20 @@ def calcolo_temp_norm_gg(file_t_norm,inizio,fine,finestra_media_mobile_g):
     temp_mean['mese'] = temp_mean['monthday'].str.slice(stop=2).astype('int')
     temp_mean['giorno'] = temp_mean['monthday'].str.slice(start=-2).astype('int')
 
-    temp_max = temp_max.merge(max_min_gg,on=['dayofyear','provincia'],how='left')
-    temp_min = temp_min.merge(max_min_gg,on=['dayofyear','provincia'],how='left')
-    temp_mean = temp_mean.merge(max_min_gg,on=['dayofyear','provincia'],how='left')
+    temp_max = temp_max.merge(max_min_gg,on=['dayofyear',tipo],how='left')
+    temp_min = temp_min.merge(max_min_gg,on=['dayofyear',tipo],how='left')
+    temp_mean = temp_mean.merge(max_min_gg,on=['dayofyear',tipo],how='left')
 
-    temp_max = temp_max[['dayofyear','mese','giorno','provincia','T_max_mean','T_min_abs','T_max_abs','std','var','yhat_max','percentile_max_10_T_norm','percentile_max_90_T_norm','percentile_max_10_yhat','percentile_max_90_yhat','c_i_95_T_max_mean_l','c_i_95_T_max_mean_h','c_i_95_yhat_max_l','c_i_95_yhat_max_h']]
-    temp_min = temp_min[['dayofyear','mese','giorno','provincia','T_min_mean','T_min_abs','T_max_abs','std','var','yhat_min','percentile_min_10_T_norm','percentile_min_90_T_norm','percentile_min_10_yhat','percentile_min_90_yhat','c_i_95_T_min_mean_l','c_i_95_T_min_mean_h','c_i_95_yhat_min_l','c_i_95_yhat_min_h']]
-    temp_mean = temp_mean[['dayofyear','mese','giorno','provincia','T_mean_m','T_min_abs','T_max_abs','gradi_giorno_yhat_mean','gradi_giorno_T_mean','std','var','yhat_mean','percentile_mean_10_T_norm','percentile_mean_90_T_norm','percentile_mean_10_yhat','percentile_mean_90_yhat','c_i_95_T_mean_m_l','c_i_95_T_mean_m_h','c_i_95_yhat_mean_l','c_i_95_yhat_mean_h']]
+    temp_max = temp_max[['dayofyear','mese','giorno',tipo,'T_max_mean','T_min_abs','T_max_abs','std','var','yhat_max','percentile_max_10_T_norm','percentile_max_90_T_norm','percentile_max_10_yhat','percentile_max_90_yhat','c_i_95_T_max_mean_l','c_i_95_T_max_mean_h','c_i_95_yhat_max_l','c_i_95_yhat_max_h']]
+    temp_min = temp_min[['dayofyear','mese','giorno',tipo,'T_min_mean','T_min_abs','T_max_abs','std','var','yhat_min','percentile_min_10_T_norm','percentile_min_90_T_norm','percentile_min_10_yhat','percentile_min_90_yhat','c_i_95_T_min_mean_l','c_i_95_T_min_mean_h','c_i_95_yhat_min_l','c_i_95_yhat_min_h']]
+    temp_mean = temp_mean[['dayofyear','mese','giorno',tipo,'T_mean_m','T_min_abs','T_max_abs','gradi_giorno_yhat_mean','gradi_giorno_T_mean','std','var','yhat_mean','percentile_mean_10_T_norm','percentile_mean_90_T_norm','percentile_mean_10_yhat','percentile_mean_90_yhat','c_i_95_T_mean_m_l','c_i_95_T_mean_m_h','c_i_95_yhat_mean_l','c_i_95_yhat_mean_h']]
     
 #     temp_max.rename(columns={'T_min_abs':'t_min_abs','T_max_abs':'t_max_abs','T_max_mean':'t_mean','yhat_max':'yhat','percentile_max_10_T_norm':'percentile_10_t_mean','percentile_max_90_T_norm':'percentile_90_t_mean','percentile_max_10_yhat':'percentile_10_yhat','percentile_max_90_yhat':'percentile_90_yhat','c_i_95_T_max_mean_l':'c_i_95_t_mean_l','c_i_95_T_max_mean_h':'c_i_95_t_mean_u','c_i_95_yhat_max_l':'c_i_95_yhat_l','c_i_95_yhat_max_h':'c_i_95_yhat_u'},inplace=True)
 #     temp_min.rename(columns={'T_min_abs':'t_min_abs','T_max_abs':'t_max_abs','T_min_mean':'t_mean','yhat_min':'yhat','percentile_min_10_T_norm':'percentile_10_t_mean','percentile_min_90_T_norm':'percentile_90_t_mean','percentile_min_10_yhat':'percentile_10_yhat','percentile_min_90_yhat':'percentile_90_yhat','c_i_95_T_min_mean_l':'c_i_95_t_mean_l','c_i_95_T_min_mean_h':'c_i_95_t_mean_u','c_i_95_yhat_min_l':'c_i_95_yhat_l','c_i_95_yhat_min_h':'c_i_95_yhat_u'},inplace=True)
 #     temp_mean.rename(columns={'T_min_abs':'t_min_abs','T_max_abs':'t_max_abs','T_mean_m':'t_mean','yhat_mean':'yhat','percentile_mean_10_T_norm':'percentile_10_t_mean','percentile_mean_90_T_norm':'percentile_90_t_mean','percentile_mean_10_yhat':'percentile_10_yhat','percentile_mean_90_yhat':'percentile_90_yhat','c_i_95_T_mean_m_l':'c_i_95_t_mean_l','c_i_95_T_mean_m_h':'c_i_95_t_mean_u','c_i_95_yhat_mean_l':'c_i_95_yhat_l','c_i_95_yhat_mean_h':'c_i_95_yhat_u'},inplace=True)
 
     return temp_max,temp_min,temp_mean
+
 
 def highest_number(df):
     df['n_osservazioni'] = df.n_osservazioni.max()
@@ -366,6 +407,7 @@ def calcolo_oss_gg(file_oss,inizio,fine,finestra_media_mobile_g):
         dayofyear=lambda x: (x.date).dt.dayofyear, # + pd.DateOffset(days=92)
         year=lambda x: (x.date).dt.year, # + pd.DateOffset(days=92)
     )
+    
     print("Calcolo deviazione standard.")
     df_oss_std_var = df_oss.groupby('codice_oss').apply(compute_std_var, finestra_media_mobile_g=finestra_media_mobile_g, col='T_oss')[['codice_oss','date','T_oss_var','T_oss_std']]
     
@@ -438,7 +480,7 @@ def calcolo_oss_gg(file_oss,inizio,fine,finestra_media_mobile_g):
     
     return temp_oss_sv_yhat
 
-def main_gg(file_input,inizio,fine,finestra_media_mobile_g,path_to_output):
+def main_gg(file_input,inizio,fine,finestra_media_mobile_g,path_to_output,tipo):
     
     print('Funzione dedicata al calcolo delle temperature giornaliere e mensili.')
     print('\n')
@@ -450,44 +492,56 @@ def main_gg(file_input,inizio,fine,finestra_media_mobile_g,path_to_output):
     inizio_dt = pd.to_datetime(inizio,format="%Y-%m-%d")
     fine_dt = pd.to_datetime(fine,format="%Y-%m-%d")
     
+    now = str(datetime.now())[0:-7].replace('-','').replace(' ','').replace(':','')
+    
     file_name_out = inizio.replace('-','') + '_' + fine.replace('-','') + '_' + str(datetime.now())[0:-7].replace('-','').replace(' ','').replace(':','')
         
-    df = pd.read_csv('s3://'+ my_bucket +'/'+file_input)#,encoding='utf-16')
-    if 'Codice Provincia' in df.columns:
-        print('Calcolo temperatura normale giornaliera con funzioni armoniche di 6^ grado')
-        temp_max_norm, temp_min_norm, temp_mean_norm = calcolo_temp_norm_gg('s3://'+ my_bucket +'/'+file_input,inizio_dt,fine_dt,finestra_media_mobile_g)
+    #df = pd.read_csv('s3://'+ my_bucket +'/'+file_input)#,encoding='utf-16')
+    df = costruzione_file_da_mensile(file_input,inizio,fine)
+    
+    #if 'Codice Provincia' in df.columns:
+    #if 'PROVINCIA' in df.columns:
+    #if tipo.upper() == 'PROVINCIA':
+    print('Calcolo temperatura normale giornaliera per '+str(tipo)+' con funzioni armoniche di 6^ grado')
+#         temp_max_norm, temp_min_norm, temp_mean_norm = calcolo_temp_norm_gg('s3://'+ my_bucket +'/'+file_input,inizio_dt,fine_dt,finestra_media_mobile_g)
+    temp_max_norm, temp_min_norm, temp_mean_norm = calcolo_temp_norm_gg(df,inizio_dt,fine_dt,finestra_media_mobile_g,tipo)
+
 #         temp_max_norm.drop('dayofyear',inplace=True,axis=1)
 #         temp_min_norm.drop('dayofyear',inplace=True,axis=1)
 #         temp_mean_norm.drop('dayofyear',inplace=True,axis=1)
-        
-        temp_max_norm.to_csv('s3://'+ my_bucket +'/'+path_to_output+'max_d_prov/'+file_name_out+'/max_d_prov.csv',index=False)
-        idrun_max = 's3://'+ my_bucket +'/'+path_to_output+'max_d_prov/'+file_name_out+'/max_d_prov.csv'
-        metadatati_max = pd.DataFrame(data={'MODELLO':['MAX_D_PROV']*4,'ID_RUN':[idrun_max]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
-        metadatati_max.to_csv('s3://'+ my_bucket +'/metadati/sistema/temperatura_norm/zeus/metadati/max_d_prov/'+file_name_out+'/metadati.csv',index=False)
-        
-        temp_min_norm.to_csv('s3://'+ my_bucket +'/'+path_to_output+'min_d_prov/'+file_name_out+'/min_d_prov.csv',index=False)
-        idrun_min = 's3://'+ my_bucket +'/'+path_to_output+'min_d_prov/'+file_name_out+'/min_d_prov.csv'
-        metadatati_min = pd.DataFrame(data={'MODELLO':['MIN_D_PROV']*4,'ID_RUN':[idrun_min]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
-        metadatati_min.to_csv('s3://'+ my_bucket +'/metadati/sistema/temperatura_norm/zeus/metadati/min_d_prov/'+file_name_out+'/metadati.csv',index=False)
-        
-        temp_mean_norm.to_csv('s3://'+ my_bucket +'/'+path_to_output+'mean_d_prov/'+file_name_out+'/mean_d_prov.csv',index=False)
-        idrun_mean = 's3://'+ my_bucket +'/'+path_to_output+'mean_d_prov/'+file_name_out+'/mean_d_prov.csv'
-        metadatati_mean = pd.DataFrame(data={'MODELLO':['MEAN_D_PROV']*4,'ID_RUN':[idrun_mean]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
-        metadatati_mean.to_csv('s3://'+ my_bucket +'/metadati/sistema/temperatura_norm/zeus/metadati/mean_d_prov/'+file_name_out+'/metadati.csv',index=False)
+
+    temp_max_norm.to_csv('s3://'+ my_bucket +'/'+path_to_output+'max_d_'+tipo+'/'+file_name_out+'/max_d_'+tipo+'.csv',index=False)
+    idrun_max = path_to_output+'/max_d_'+tipo+'/'+file_name_out+'/max_d_'+tipo+'.csv'
+    metadatati_max = pd.DataFrame(data={'CATEGORIA':['TEMPERATURA_NORM']*4,'FLUSSO':['MAX_D_'+tipo.upper()]*4,'TIMESTAMP':[now]*4,'ID':['TEMPERATURA_NORM_MAX_D_'+tipo.upper()+'_'+now]*4,'PATH':[idrun_max]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
+    metadatati_max.to_csv('s3://'+ my_bucket +'/metadati/sistema/temperatura_norm/zeus/metadati/max_d_'+tipo+'/'+file_name_out+'/metadati.csv',index=False)
+    #metadatati_max.to_csv('./metadati/metadati_prov_gg_max.csv',index=False)
+    temp_min_norm.to_csv('s3://'+ my_bucket +'/'+path_to_output+'min_d_'+tipo+'/'+file_name_out+'/min_d'+tipo+'.csv',index=False)
+    idrun_min = path_to_output+'min_d_prov/'+file_name_out+'/min_d_'+tipo+'.csv'
+    metadatati_min = pd.DataFrame(data={'CATEGORIA':['TEMPERATURA_NORM']*4,'FLUSSO':['MIN_D_'+tipo.upper()]*4,'TIMESTAMP':[now]*4,'ID':['TEMPERATURA_NORM_MIN_D_'+tipo.upper()+'_'+now]*4,'PATH':[idrun_min]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
+    metadatati_min.to_csv('s3://'+ my_bucket +'/metadati/sistema/temperatura_norm/zeus/metadati/min_d'+tipo+'/'+file_name_out+'/metadati.csv',index=False)
+    #metadatati_min.to_csv('./metadati/metadati_prov_gg_min.csv',index=False)
+
+    temp_mean_norm.to_csv('s3://'+ my_bucket +'/'+path_to_output+'mean_d_prov/'+file_name_out+'/mean_d_'+tipo+'.csv',index=False)
+    idrun_mean = path_to_output+'mean_d_prov/'+file_name_out+'/mean_d_'+tipo+'.csv'
+    metadatati_mean = pd.DataFrame(data={'CATEGORIA':['TEMPERATURA_NORM']*4,'FLUSSO':['MEAN_D_'+tipo.upper()]*4,'TIMESTAMP':[now]*4,'ID':['TEMPERATURA_NORM_MEAN_D_'+tipo.upper()+'_'+now]*4,'PATH':[idrun_mean]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
+    #metadatati_mean.to_csv('./metadati/metadati_prov_gg_mean.csv',index=False)
+    metadatati_mean.to_csv('s3://'+ my_bucket +'/metadati/sistema/temperatura_norm/zeus/metadati/mean_d_'+tipo+'/'+file_name_out+'/metadati.csv',index=False)
 #         temp_max_norm.to_csv('prova_gg_max.csv',index=False)
 #         temp_min_norm.to_csv('prova_gg_min.csv',index=False)
 #         temp_mean_norm.to_csv('prova_gg_mean.csv',index=False)
-        print('\n')
+    print('\n')
     else:
         print('Calcolo osservatorio giornaliero con funzioni armoniche di 6^ grado')
         temp_oss_sv = calcolo_oss_gg('s3://'+ my_bucket +'/'+file_input,inizio_dt,fine_dt,finestra_media_mobile_g)
         #temp_oss_sv.drop(columns='dayofyear',inplace=True,axis=1)
         
-        temp_oss_sv.to_csv('s3://'+ my_bucket +'/'+path_to_output+'mean_d_oss/'+file_name_out+'/mean_d_oss.csv',index=False)
-        idrun = 's3://'+ my_bucket +'/'+path_to_output+'mean_d_oss/'+file_name_out+'/mean_d_oss.csv'
-        metadati = pd.DataFrame(data={'MODELLO':['MEAN_D_OSS']*4,'ID_RUN':[idrun]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
-        metadati.to_csv('s3://'+ my_bucket +'/metadati/sistema/mean_d_v/zeus/temperatura_norm/zeus/metadati/mean_d_oss/'+file_name_out+'/metadati.csv',index=False)
-#         temp_oss_sv.to_csv('prova_gg_oss.csv',index=False)
+        temp_oss_sv.to_csv('s3://'+ my_bucket +'/'+path_to_output+'mean_d_'+tipo+'/'+file_name_out+'/mean_d_'+tipo+'.csv',index=False)
+        idrun = path_to_output+'mean_d_oss/'+file_name_out+'/mean_d_'+tipo+'.csv'
+        metadati = pd.DataFrame(data={'CATEGORIA':['TEMPERATURA_NORM']*4,'FLUSSO':['MEAN_D_'+tipo.upper()]*4,'TIMESTAMP':[now]*4,'ID':['TEMPERATURA_NORM_MEAN_D_'+tipo.upper()+'_'+now]*4,'PATH':[idrun]*4,'NOME_PARAMETRO':['INIZIO','FINE','FINESTRA_MEDIA_MOBILE_G','PATH_TO_OUTPUT'],'VALORE_PARAMETRO':[inizio,fine,finestra_media_mobile_g,path_to_output]})
+        metadati.to_csv('s3://'+ my_bucket +'/metadati/sistema/zeus/temperatura_norm/zeus/metadati/mean_d_'+tipo+'oss/'+file_name_out+'/metadati.csv',index=False)
+        #metadati.to_csv('./metadati/metadati_oss_gg_max.csv',index=False)
+
+        #         temp_oss_sv.to_csv('prova_gg_oss.csv',index=False)
         print('\n')
     print("Procedura terminata.")
     
